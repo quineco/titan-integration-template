@@ -49,15 +49,9 @@ pub const ROUTE_WEIGHT_ALL: u32 = 1_000_000_000;
 #[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Venue {
     RaydiumAmm,
-    // FILL_IN: add your venue variant here, in the SAME position as in
-    // `state.rs`. Include any CPI parameters the router must pass to your venue
-    // adapter, such as direction flags.
-    TemplateVenue { zero_for_one: bool },
-}
-
-#[allow(dead_code)]
-fn fill_in_route_venue_variant() -> ! {
-    todo!("add your route Venue variant in the same position as the program enum")
+    /// Bankineco vault: deposit (base asset → shares) when `is_deposit = true`,
+    /// withdrawal (shares → base asset) when `false`.
+    BankinecoVault { is_deposit: bool },
 }
 
 impl Venue {
@@ -96,10 +90,15 @@ pub fn protocol_to_venue(
 ) -> Result<Venue, TradingVenueError> {
     match venue.protocol() {
         PoolProtocol::RaydiumAMM => Ok(Venue::RaydiumAmm),
-        // FILL_IN: map your PoolProtocol variant to your Venue variant.
-        PoolProtocol::YourPoolProtocol => {
-            let _ = (venue, request);
-            todo!("map YourPoolProtocol to your Venue variant")
+        PoolProtocol::PerenaVault => {
+            // Share mint is always token_info[0] by convention (see YourVenue).
+            let share_mint = venue
+                .get_token_info()
+                .first()
+                .map(|ti| ti.pubkey)
+                .ok_or_else(|| TradingVenueError::MissingState("bankineco share_mint".into()))?;
+            let is_deposit = request.input_mint != share_mint;
+            Ok(Venue::BankinecoVault { is_deposit })
         }
     }
 }
@@ -342,14 +341,11 @@ mod tests {
     fn venue_borsh_bytes_are_stable() {
         assert_eq!(Venue::RaydiumAmm.to_borsh_bytes(), vec![0]);
         assert_eq!(
-            Venue::TemplateVenue {
-                zero_for_one: false,
-            }
-            .to_borsh_bytes(),
+            Venue::BankinecoVault { is_deposit: false }.to_borsh_bytes(),
             vec![1, 0]
         );
         assert_eq!(
-            Venue::TemplateVenue { zero_for_one: true }.to_borsh_bytes(),
+            Venue::BankinecoVault { is_deposit: true }.to_borsh_bytes(),
             vec![1, 1]
         );
     }

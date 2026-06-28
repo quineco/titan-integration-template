@@ -1,16 +1,13 @@
-//! Your venue's test suite — the same shared assertions the example passes, run
-//! against `YourVenue`. On a fresh template these are red (the `YourVenue`
-//! methods are `todo!()`); implement `src/your_venue/mod.rs` and fill in the
-//! config below to turn them green.
-//!
-//! Like the example suite, the tests SKIP when `SOLANA_RPC_URL` (and, for the
-//! simulations, dumped program binaries) are absent.
+//! Bankineco vault test suite — the same shared assertions the example passes,
+//! run against `YourVenue` (the Bankineco integration). Tests SKIP when
+//! `SOLANA_RPC_URL` is unset or when program binaries are missing from
+//! `programs/` (see `make dump-programs`).
 
 mod common;
 
 use common::SuiteConfig;
-use solana_pubkey::Pubkey;
-use titan_integration_template::your_venue::YourVenue;
+use solana_pubkey::{Pubkey, pubkey};
+use titan_integration_template::your_venue::{TEST_VAULT, YOUR_PROGRAM_ID, YourVenue};
 
 // Installs the allocation guard that powers the construction test's
 // `assert_no_alloc` checks. The Makefile runs that test under `release-debug`
@@ -20,14 +17,14 @@ use titan_integration_template::your_venue::YourVenue;
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 fn pool() -> Pubkey {
-    // FILL_IN: a real pool/market account for your venue to quote.
-    todo!("set tests/your_venue.rs pool to a real pool or market account")
+    TEST_VAULT
 }
 
 fn programs() -> Vec<Pubkey> {
-    // FILL_IN: your program plus any runtime-dependency programs the swap CPI
-    // touches. Dump each to programs/<id>.so via `make dump-programs`.
-    todo!("set tests/your_venue.rs programs to your venue program dependencies")
+    // The vault program binary must be dumped to programs/<id>.so.
+    // Run `make dump-programs` (or `solana program dump <id> programs/<id>.so`)
+    // before executing the simulation-backed tests.
+    vec![YOUR_PROGRAM_ID]
 }
 
 fn config() -> SuiteConfig {
