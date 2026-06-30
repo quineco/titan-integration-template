@@ -95,37 +95,44 @@ struct MarginfiMintConfig {
     bank: Pubkey,
     liquidity_vault: Pubkey,
     liquidity_vault_auth: Pubkey,
+    oracle: Pubkey,
 }
 
 const MARGINFI_USDC: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("2s37akK2eyBbp8DZgCm7RtsaEz8eJP3Nxd4urLHQv7yB"),
     liquidity_vault: Pubkey::from_str_const("7jaiZR5Sk8hdYN9MxTpczTcwbWpb5WEoxSANuUwveuat"),
     liquidity_vault_auth: Pubkey::from_str_const("3uxNepDbmkDNq6JhRja5Z8QwbTrfmkKP8AKZV5chYDGG"),
+    oracle: Pubkey::from_str_const("Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"),
 };
 const MARGINFI_USDT: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("HmpMfL8942u22htC4EMiandCNCtkoFtyytu6aTFZMoiD"),
     liquidity_vault: Pubkey::from_str_const("4tFJXnPFMWnqFBYBhd3FnBMWMM4PJJmqcCH4ZYrCFvNe"),
     liquidity_vault_auth: Pubkey::from_str_const("7sXoVHHR7SLRB9Cz3EHjSM3M1JBoqB6fVLSmjVYTATxB"),
+    oracle: Pubkey::from_str_const("HT2PLQBcG5W5UrEKtNkLwNhXHMdWJv7WKQUQYmFtB9KL"),
 };
 const MARGINFI_PYUSD: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("8UEiPmgZHXXEDrqLS3oiTxQxTbeYTtPbeMBxAd2XGbpu"),
     liquidity_vault: Pubkey::from_str_const("ENnfVnYcbKZN57mUYCvsMiNUXZ8m2Dc1HETyfNDD66A8"),
     liquidity_vault_auth: Pubkey::from_str_const("582VxpQGLfUJRsdPYU2Q8dVLn1uxx9BuPMvtgwseB662"),
+    oracle: Pubkey::from_str_const("9zXQxpYH3kYhtoybmZfUNNCRVuud7fY9jswTg1hLyT8k"),
 };
 const MARGINFI_USDG: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("Dj2CwMF3GM7mMT5hcyGXKuYSQ2kQ5zaVCkA1zX1qaTva"),
     liquidity_vault: Pubkey::from_str_const("5Euy1GJaWcF8BcZa2wbvKZq9ZU95anedL9TW416ZJNpK"),
     liquidity_vault_auth: Pubkey::from_str_const("J2RutaNtmw5Ri32iiZTexxNYHyDqJKbt6gVWCmv6hmnx"),
+    oracle: Pubkey::from_str_const("5jaKPgAzTZZKfDPSfBtCgETFBXSQkgBDovdFoHAK6m3C"),
 };
 const MARGINFI_USDS: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("FDsf8sj6SoV313qrA91yms3u5b3P4hBxEPvanVs8LtJV"),
     liquidity_vault: Pubkey::from_str_const("26uoGkHSxBSL2oMcpdMZT7pss6wsiVCgFw6US58YZggd"),
     liquidity_vault_auth: Pubkey::from_str_const("2bqe5Zdkw7zsyWZ2prmWgPbr3LfMCYEDNSqizTw2BqKL"),
+    oracle: Pubkey::from_str_const("DyYBBWEi9xZvgNAeMDCiFnmC1U9gqgVsJDXkL5WETpoX"),
 };
 const MARGINFI_CASH: MarginfiMintConfig = MarginfiMintConfig {
     bank: Pubkey::from_str_const("F4brCRJHx8epWah7p8Ace4ehutphxYZ1ctRq2LS3iiBh"),
     liquidity_vault: Pubkey::from_str_const("BogSuoRVycg5VSKSXi9YGjajhZ5uwCDA4HVPATEQXYVq"),
     liquidity_vault_auth: Pubkey::from_str_const("2nbp41Q7xN9wtomgoP3APtanSvqTg5PfYyNafPyABBp6"),
+    oracle: Pubkey::from_str_const("6BfFmUuNJgQ5GCNj3V8YmgSLskFrQMWXa2N8i6ACsW5q"),
 };
 
 fn marginfi_config_for_mint(mint: &Pubkey) -> Option<&'static MarginfiMintConfig> {
@@ -149,8 +156,8 @@ fn marginfi_config_for_mint(mint: &Pubkey) -> Option<&'static MarginfiMintConfig
 /// Serialize `InstructionRefs` for a single Marginfi withdraw CPI.
 ///
 /// Wire format (all fields borsh `Vec<u8>`):
-///   CpiMapping.indices  : [0..8] — 9 remaining accounts in order
-///   CpiMapping.lengths  : [9]    — one CPI consuming all 9 accounts
+///   CpiMapping.indices  : [0..9] — 10 remaining accounts in order
+///   CpiMapping.lengths  : [10]   — one CPI consuming all 10 accounts
 ///   CpiRefs.types       : [3]    — CpiType::MARGINFI_WITHDRAW
 ///   CpiRefs.args        : [0xFF, 0xFF] — Skip sentinel; amount resolved on-chain
 ///   InstructionRefs.tracked : []
@@ -159,9 +166,9 @@ fn build_marginfi_ix_refs() -> Vec<u8> {
         out.extend_from_slice(&(v.len() as u32).to_le_bytes());
         out.extend_from_slice(v);
     }
-    let mut out = Vec::with_capacity(33);
-    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8], &mut out);
-    borsh_vec(&[9], &mut out);
+    let mut out = Vec::with_capacity(36);
+    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], &mut out);
+    borsh_vec(&[10], &mut out);
     borsh_vec(&[3], &mut out);
     borsh_vec(&[0xFF, 0xFF], &mut out);
     borsh_vec(&[], &mut out);
@@ -306,6 +313,7 @@ pub struct YourVenue {
     mint_fee_bps: u16,
     burn_fee_bps: u16,
     tranching_enabled: bool,
+    circuit_breaker_active: bool,
     /// Active Marginfi external-liquidity position: (user_account, slot_index).
     /// `None` when the vault has no Marginfi liquidity deployed.
     marginfi_position: Option<(Pubkey, u8)>,
@@ -375,6 +383,7 @@ impl YourVenue {
             mint_fee_bps: vault.config.fees.mint_fee_bps,
             burn_fee_bps: vault.config.fees.burn_fee_bps,
             tranching_enabled: vault.tranching_enabled == 1,
+            circuit_breaker_active: vault.circuit_breaker_active != 0,
             marginfi_position,
             base_holdings,
         }
@@ -470,6 +479,7 @@ impl TradingVenue for YourVenue {
         self.mint_fee_bps = updated.mint_fee_bps;
         self.burn_fee_bps = updated.burn_fee_bps;
         self.tranching_enabled = updated.tranching_enabled;
+        self.circuit_breaker_active = updated.circuit_breaker_active;
         self.marginfi_position = updated.marginfi_position;
         self.base_holdings = updated.base_holdings;
         self.token_info = updated.token_info;
@@ -478,6 +488,11 @@ impl TradingVenue for YourVenue {
     }
 
     fn quote(&self, request: QuoteRequest) -> Result<QuoteResult, TradingVenueError> {
+        if self.circuit_breaker_active {
+            return Err(TradingVenueError::MissingState(
+                "vault circuit breaker is active".into(),
+            ));
+        }
         let is_deposit = request.input_mint != self.share_mint;
         let asset_mint = if is_deposit {
             request.input_mint
@@ -641,6 +656,7 @@ impl TradingVenue for YourVenue {
                     AccountMeta::new_readonly(config.liquidity_vault_auth, false),
                     AccountMeta::new(config.liquidity_vault, false),
                     AccountMeta::new_readonly(asset_token_program, false),
+                    AccountMeta::new_readonly(config.oracle, false),
                 ]);
             } else {
                 // No Marginfi: Option::None for both args
