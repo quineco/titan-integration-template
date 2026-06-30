@@ -156,8 +156,8 @@ fn marginfi_config_for_mint(mint: &Pubkey) -> Option<&'static MarginfiMintConfig
 /// Serialize `InstructionRefs` for a single Marginfi withdraw CPI.
 ///
 /// Wire format (all fields borsh `Vec<u8>`):
-///   CpiMapping.indices  : [0..9] — 10 remaining accounts in order
-///   CpiMapping.lengths  : [10]   — one CPI consuming all 10 accounts
+///   CpiMapping.indices  : [0,1,2,3,4,5,6,7,8,4,9] — bank (4) repeated as remaining_account for health check
+///   CpiMapping.lengths  : [11]  — one CPI, 11 account references
 ///   CpiRefs.types       : [3]    — CpiType::MARGINFI_WITHDRAW
 ///   CpiRefs.args        : [0xFF, 0xFF] — Skip sentinel; amount resolved on-chain
 ///   InstructionRefs.tracked : []
@@ -167,8 +167,8 @@ fn build_marginfi_ix_refs() -> Vec<u8> {
         out.extend_from_slice(v);
     }
     let mut out = Vec::with_capacity(36);
-    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], &mut out);
-    borsh_vec(&[10], &mut out);
+    borsh_vec(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 4, 9], &mut out); // bank at 4 repeated for health check
+    borsh_vec(&[11], &mut out);
     borsh_vec(&[3], &mut out);
     borsh_vec(&[0xFF, 0xFF], &mut out);
     borsh_vec(&[], &mut out);
