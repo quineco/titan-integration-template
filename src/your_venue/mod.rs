@@ -82,10 +82,6 @@ const MARGINFI_PROGRAM_ID: Pubkey =
 const MAIN_MARGINFI_GROUP: Pubkey =
     Pubkey::from_str_const("4qp6Fx6tnZkY5Wropq9wUYgtFxXKwE6viZxFHg3rdAG8");
 
-const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
-const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
-    Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bJ8");
-
 /// Per-mint Marginfi bank configuration (mainnet).
 ///
 /// Seeds (derived from the Marginfi program):
@@ -591,7 +587,7 @@ impl TradingVenue for YourVenue {
         );
 
         let mut accounts = vec![
-            AccountMeta::new(user, true), // signer flag cleared by route builder for PDA
+            AccountMeta::new_readonly(user, false),
             AccountMeta::new(self.pool_id, false),
             AccountMeta::new_readonly(vault_oracle, false),
         ];
@@ -613,8 +609,6 @@ impl TradingVenue for YourVenue {
             AccountMeta::new(user_share_ata, false),
             AccountMeta::new_readonly(asset_token_program, false),
             AccountMeta::new_readonly(share_token_program, false),
-            AccountMeta::new_readonly(ASSOCIATED_TOKEN_PROGRAM_ID, false),
-            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         ]);
 
         // Instruction data:
