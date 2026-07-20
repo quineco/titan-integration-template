@@ -17,15 +17,24 @@
 //!
 //! ## Quote math
 //!
+//! Mirrors onchain `shares_for_deposit_with_value` / withdraw planning — **not**
+//! the inverse of floored `mint_share_price` (that overquotes deposits).
+//!
 //! ```text
-//! out_gross = in * price_in * 10^dec_out / (price_out * 10^dec_in)
-//! fee       = out_gross * fee_bps / 10_000
-//! out_net   = out_gross - fee
-//! price     = out_net / in  (constant — the curve is linear)
+//! deposit:
+//!   accounting = floor(in × asset_price / 10^asset_decimals)
+//!   net        = accounting − floor(accounting × fee_bps / 10_000)
+//!   shares     = floor(net × total_mint_supply / tvl)   // or `net` if empty
+//!
+//! withdraw:
+//!   amount     = floor(shares × tvl / total_mint_supply)
+//!   net        = amount − floor(amount × fee_bps / 10_000)
+//!   tokens     = floor(net × 10^asset_decimals / asset_price)
 //! ```
 //!
-//! where `price_in` / `price_out` are the vault's 6-decimal fixed-point asset
-//! prices in the accounting unit (1_000_000 = 1.00).
+//! The curve is still linear in trade size, so Titan's monotonicity / MVT
+//! checks hold with a constant marginal price of
+//! `(1 − fee) × asset_price × supply / (tvl × 10^decimals)` (deposit).
 
 use ahash::HashSet;
 use async_trait::async_trait;
@@ -219,6 +228,11 @@ pub fn parse_pool_creations(instructions: &[ParsedInstruction]) -> Vec<PoolCreat
         .collect()
 }
 
+#[inline]
+fn mul_div(a: u128, b: u128, c: u128) -> Option<u128> {
+    a.checked_mul(b)?.checked_div(c)
+}
+
 /// Marginal price for a bankineco vault swap (output atoms per input atom).
 ///
 /// The vault is a linear fixed-price AMM: the price is constant for any swap
@@ -226,66 +240,112 @@ pub fn parse_pool_creations(instructions: &[ParsedInstruction]) -> Vec<PoolCreat
 /// trivially (a constant derivative on a linear output curve).
 fn marginal_price(
     is_deposit: bool,
-    share_price: u64,
-    share_decimals: u8,
     asset_price: u64,
     asset_decimals: u8,
+    total_mint_supply: u64,
+    backing_value: u64,
     fee_bps: u16,
-) -> f64 {
-    let (price_in, dec_in, price_out, dec_out) = if is_deposit {
-        (
-            asset_price as f64,
-            asset_decimals as i32,
-            share_price as f64,
-            share_decimals as i32,
-        )
+) -> Option<f64> {
+    if asset_price == 0 {
+        return None;
+    }
+    let fee_factor = 1.0 - fee_bps as f64 / BPS as f64;
+    let scale = 10f64.powi(asset_decimals as i32);
+
+    let rate = if is_deposit {
+        // d(shares)/d(in) = (1−fee) × asset_price × supply / (tvl × 10^dec)
+        // Empty vault mints 1:1 with accounting units.
+        if total_mint_supply == 0 || backing_value == 0 {
+            asset_price as f64 / scale
+        } else {
+            asset_price as f64 * total_mint_supply as f64 / (backing_value as f64 * scale)
+        }
     } else {
-        (
-            share_price as f64,
-            share_decimals as i32,
-            asset_price as f64,
-            asset_decimals as i32,
-        )
+        if total_mint_supply == 0 || backing_value == 0 {
+            return None;
+        }
+        // d(tokens)/d(shares) = (1−fee) × tvl × 10^dec / (supply × asset_price)
+        backing_value as f64 * scale / (total_mint_supply as f64 * asset_price as f64)
     };
-    let rate = price_in * 10f64.powi(dec_out) / (price_out * 10f64.powi(dec_in));
-    rate * (1.0 - fee_bps as f64 / BPS as f64)
+    Some(rate * fee_factor)
+}
+
+/// Deposit: base asset in → share tokens out (mirrors onchain plan_deposit_*).
+fn calc_deposit_out(
+    in_amount: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    total_mint_supply: u64,
+    backing_value: u64,
+    fee_bps: u16,
+) -> Option<u64> {
+    if asset_price == 0 {
+        return None;
+    }
+    let scale = 10u128.pow(asset_decimals as u32);
+    let accounting = mul_div(in_amount as u128, asset_price as u128, scale)?;
+    if accounting == 0 {
+        return None;
+    }
+    let fee = accounting * fee_bps as u128 / BPS;
+    let net = accounting.checked_sub(fee)?;
+    let shares = if total_mint_supply == 0 || backing_value == 0 {
+        net
+    } else {
+        mul_div(net, total_mint_supply as u128, backing_value as u128)?
+    };
+    shares.try_into().ok()
+}
+
+/// Withdraw: share tokens in → base asset out (mirrors onchain plan_withdraw_*).
+fn calc_withdraw_out(
+    in_shares: u64,
+    asset_price: u64,
+    asset_decimals: u8,
+    total_mint_supply: u64,
+    backing_value: u64,
+    fee_bps: u16,
+) -> Option<u64> {
+    if asset_price == 0 || total_mint_supply == 0 {
+        return None;
+    }
+    let amount_out =
+        mul_div(in_shares as u128, backing_value as u128, total_mint_supply as u128)?;
+    let fee = amount_out * fee_bps as u128 / BPS;
+    let net = amount_out.checked_sub(fee)?;
+    let scale = 10u128.pow(asset_decimals as u32);
+    mul_div(net, scale, asset_price as u128)?.try_into().ok()
 }
 
 /// Compute net output atoms for an exact-in bankineco vault swap.
 fn calc_out(
     is_deposit: bool,
     in_amount: u64,
-    share_price: u64,
-    share_decimals: u8,
     asset_price: u64,
     asset_decimals: u8,
+    total_mint_supply: u64,
+    backing_value: u64,
     fee_bps: u16,
 ) -> Option<u64> {
-    if share_price == 0 {
-        return None;
-    }
-    let (price_in, dec_in, price_out, dec_out) = if is_deposit {
-        (
-            asset_price as u128,
+    if is_deposit {
+        calc_deposit_out(
+            in_amount,
+            asset_price,
             asset_decimals,
-            share_price as u128,
-            share_decimals,
+            total_mint_supply,
+            backing_value,
+            fee_bps,
         )
     } else {
-        (
-            share_price as u128,
-            share_decimals,
-            asset_price as u128,
+        calc_withdraw_out(
+            in_amount,
+            asset_price,
             asset_decimals,
+            total_mint_supply,
+            backing_value,
+            fee_bps,
         )
-    };
-    let numerator = (in_amount as u128)
-        .checked_mul(price_in)?
-        .checked_mul(10u128.pow(dec_out as u32))?;
-    let denominator = price_out.checked_mul(10u128.pow(dec_in as u32))?;
-    let out_gross = numerator.checked_div(denominator)?;
-    let fee = out_gross * fee_bps as u128 / BPS;
-    out_gross.checked_sub(fee)?.try_into().ok()
+    }
 }
 
 /// Bankineco vault quoting venue.
@@ -303,9 +363,10 @@ pub struct YourVenue {
 
     // Snapshot of vault state — refreshed in update_state.
     share_mint: Pubkey,
-    share_decimals: u8,
-    /// vault.accounting.mint_share_price — 6-decimal fixed-point.
-    share_price: u64,
+    /// Total supply of the vault share mint (raw atoms).
+    total_mint_supply: u64,
+    /// Regular share-class backing value (`tvl`, or `tvl − tranche` when tranched).
+    backing_value: u64,
     mint_fee_bps: u16,
     burn_fee_bps: u16,
     tranching_enabled: bool,
@@ -374,8 +435,11 @@ impl YourVenue {
             required_state_pubkeys,
             initialized: false,
             share_mint,
-            share_decimals: vault.mint_decimals,
-            share_price: vault.accounting.mint_share_price,
+            total_mint_supply: vault.accounting.total_mint_supply,
+            // Tranche-adjusted backing needs the tranche account; until that is
+            // wired into required_state_pubkeys, use raw TVL (correct when
+            // tranching is disabled).
+            backing_value: vault.accounting.tvl,
             mint_fee_bps: vault.config.fees.mint_fee_bps,
             burn_fee_bps: vault.config.fees.burn_fee_bps,
             tranching_enabled: vault.tranching_enabled == 1,
@@ -470,8 +534,8 @@ impl TradingVenue for YourVenue {
         // Rebuild all derived state from the refreshed vault account.
         let updated = YourVenue::build_from_vault(self.pool_id, &vault);
         self.share_mint = updated.share_mint;
-        self.share_decimals = updated.share_decimals;
-        self.share_price = updated.share_price;
+        self.total_mint_supply = updated.total_mint_supply;
+        self.backing_value = updated.backing_value;
         self.mint_fee_bps = updated.mint_fee_bps;
         self.burn_fee_bps = updated.burn_fee_bps;
         self.tranching_enabled = updated.tranching_enabled;
@@ -508,12 +572,13 @@ impl TradingVenue for YourVenue {
 
         let price = marginal_price(
             is_deposit,
-            self.share_price,
-            self.share_decimals,
             asset_price,
             asset_decimals,
+            self.total_mint_supply,
+            self.backing_value,
             fee_bps,
-        );
+        )
+        .ok_or_else(|| TradingVenueError::MissingState("quote math overflow".into()))?;
 
         // Zero-input: return spot price with zero output.
         if request.amount == 0 {
@@ -530,10 +595,10 @@ impl TradingVenue for YourVenue {
         let expected_output = calc_out(
             is_deposit,
             request.amount,
-            self.share_price,
-            self.share_decimals,
             asset_price,
             asset_decimals,
+            self.total_mint_supply,
+            self.backing_value,
             fee_bps,
         )
         .ok_or_else(|| TradingVenueError::MissingState("quote math overflow".into()))?;
