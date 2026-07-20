@@ -89,7 +89,7 @@ const VAULT_ORACLE_SEED: &[u8] = b"vault_oracle";
 const FEE_VAULT_SEED: &[u8] = b"VFEEVAULT";
 const VAULT_TRANCHE_SEED: &[u8] = b"vault_tranche";
 
-const MARGINFI_PROGRAM_ID: Pubkey =
+pub const MARGINFI_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA");
 const MAIN_MARGINFI_GROUP: Pubkey =
     Pubkey::from_str_const("4qp6Fx6tnZkY5Wropq9wUYgtFxXKwE6viZxFHg3rdAG8");
@@ -385,21 +385,21 @@ pub struct YourVenue {
     /// `None` when the vault has no Marginfi liquidity deployed.
     marginfi_position: Option<(Pubkey, u8)>,
 
-    /// Whitelisted base holdings: (mint, price, decimals, is_token_2022).
-    base_holdings: Vec<(Pubkey, u64, u8, bool)>,
+    /// Whitelisted base holdings: (mint, price, decimals, is_token_2022, local_amount, external_amount).
+    base_holdings: Vec<(Pubkey, u64, u8, bool, u64, u64)>,
 }
 
 impl YourVenue {
     fn build_from_vault(pool_id: Pubkey, vault: &Vault) -> Self {
         let share_mint = Pubkey::from(vault.mint);
 
-        let base_holdings: Vec<(Pubkey, u64, u8, bool)> = vault
+        let base_holdings: Vec<(Pubkey, u64, u8, bool, u64, u64)> = vault
             .holdings
             .iter()
             .filter(|h| h.is_base == 1 && h.mint != [0u8; 32])
             .map(|h| {
                 // TokenProgram: Spl = 0, Token2022 = 1
-                (Pubkey::from(h.mint), h.price, h.decimals, h.token_program == 1)
+                (Pubkey::from(h.mint), h.price, h.decimals, h.token_program == 1, h.local_amount, h.external_amount)
             })
             .collect();
 
@@ -411,7 +411,7 @@ impl YourVenue {
             transfer_fee: None,
             maximum_fee: None,
         }];
-        for &(mint, _, decimals, is_token_2022) in &base_holdings {
+        for &(mint, _, decimals, is_token_2022, ..) in &base_holdings {
             token_info.push(TokenInfo {
                 pubkey: mint,
                 decimals: decimals as i32,
@@ -468,11 +468,11 @@ impl YourVenue {
         self.tvl.saturating_sub(self.tranche_value)
     }
 
-    fn base_holding_for(&self, mint: &Pubkey) -> Option<(u64, u8, bool)> {
+    fn base_holding_for(&self, mint: &Pubkey) -> Option<(u64, u8, bool, u64, u64)> {
         self.base_holdings
             .iter()
             .find(|(m, ..)| m == mint)
-            .map(|&(_, price, decimals, is_tok22)| (price, decimals, is_tok22))
+            .map(|&(_, price, decimals, is_tok22, local, external)| (price, decimals, is_tok22, local, external))
     }
 
     fn find_pda(&self, seeds: &[&[u8]]) -> Pubkey {
@@ -599,7 +599,7 @@ impl TradingVenue for YourVenue {
             request.output_mint
         };
 
-        let (asset_price, asset_decimals, _) = self
+        let (asset_price, asset_decimals, _, local_amount, external_amount) = self
             .base_holding_for(&asset_mint)
             .ok_or_else(|| TradingVenueError::InvalidMint(asset_mint.into()))?;
 
@@ -648,12 +648,18 @@ impl TradingVenue for YourVenue {
         )
         .ok_or_else(|| TradingVenueError::MissingState("quote math overflow".into()))?;
 
+        // For withdrawals, the on-chain program requires gross output tokens
+        // (net + fee) ≤ local_amount + external_amount. expected_output is net,
+        // which is always ≤ gross, so this is a safe conservative check.
+        let not_enough_liquidity = !is_deposit
+            && expected_output > local_amount.saturating_add(external_amount);
+
         Ok(QuoteResult {
             input_mint: request.input_mint,
             output_mint: request.output_mint,
             amount: request.amount,
             expected_output,
-            not_enough_liquidity: false,
+            not_enough_liquidity,
             price,
         })
     }

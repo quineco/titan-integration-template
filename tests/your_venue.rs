@@ -7,7 +7,7 @@ mod common;
 
 use common::SuiteConfig;
 use solana_pubkey::{Pubkey, pubkey};
-use titan_integration_template::your_venue::{TEST_VAULT, YOUR_PROGRAM_ID, YourVenue};
+use titan_integration_template::your_venue::{MARGINFI_PROGRAM_ID, TEST_VAULT, YOUR_PROGRAM_ID, YourVenue};
 
 // Installs the allocation guard that powers the construction test's
 // `assert_no_alloc` checks. The Makefile runs that test under `release-debug`
@@ -24,7 +24,7 @@ fn programs() -> Vec<Pubkey> {
     // The vault program binary must be dumped to programs/<id>.so.
     // Run `make dump-programs` (or `solana program dump <id> programs/<id>.so`)
     // before executing the simulation-backed tests.
-    vec![YOUR_PROGRAM_ID]
+    vec![YOUR_PROGRAM_ID, MARGINFI_PROGRAM_ID]
 }
 
 fn config() -> SuiteConfig {
