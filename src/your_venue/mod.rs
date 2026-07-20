@@ -687,18 +687,21 @@ impl TradingVenue for YourVenue {
             &share_token_program,
         );
 
+        // vault_tranche_state is Option<> on-chain. Anchor treats an account
+        // whose key equals the program id as None — omitting the slot entirely
+        // shifts every subsequent account (including Marginfi remaining accounts).
+        let vault_tranche_state = if self.tranching_enabled {
+            self.find_pda(&[VAULT_TRANCHE_SEED, self.pool_id.as_ref()])
+        } else {
+            YOUR_PROGRAM_ID
+        };
+
         let mut accounts = vec![
             AccountMeta::new_readonly(user, false),
             AccountMeta::new(self.pool_id, false),
             AccountMeta::new_readonly(vault_oracle, false),
+            AccountMeta::new_readonly(vault_tranche_state, false),
         ];
-
-        // vault_tranche_state is only required when tranching is enabled.
-        if self.tranching_enabled {
-            let tranche =
-                self.find_pda(&[VAULT_TRANCHE_SEED, self.pool_id.as_ref()]);
-            accounts.push(AccountMeta::new_readonly(tranche, false));
-        }
 
         accounts.extend_from_slice(&[
             AccountMeta::new_readonly(asset_mint, false),
