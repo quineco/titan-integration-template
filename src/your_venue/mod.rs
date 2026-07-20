@@ -24,17 +24,20 @@
 //! deposit:
 //!   accounting = floor(in × asset_price / 10^asset_decimals)
 //!   net        = accounting − floor(accounting × fee_bps / 10_000)
-//!   shares     = floor(net × total_mint_supply / tvl)   // or `net` if empty
+//!   shares     = floor(net × total_mint_supply / backing)   // or `net` if empty
 //!
 //! withdraw:
-//!   amount     = floor(shares × tvl / total_mint_supply)
+//!   amount     = floor(shares × backing / total_mint_supply)
 //!   net        = amount − floor(amount × fee_bps / 10_000)
 //!   tokens     = floor(net × 10^asset_decimals / asset_price)
 //! ```
 //!
+//! `backing` is regular-class NAV: `tvl`, or `tvl − (junior + senior)` when
+//! tranching is enabled.
+//!
 //! The curve is still linear in trade size, so Titan's monotonicity / MVT
 //! checks hold with a constant marginal price of
-//! `(1 − fee) × asset_price × supply / (tvl × 10^decimals)` (deposit).
+//! `(1 − fee) × asset_price × supply / (backing × 10^decimals)` (deposit).
 
 use ahash::HashSet;
 use async_trait::async_trait;
@@ -42,7 +45,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
-use vault_sdk::Vault;
+use vault_sdk::{Vault, VaultTrancheState};
 
 use crate::{
     account_caching::AccountsCache,
@@ -426,8 +429,15 @@ impl YourVenue {
                 if pk == Pubkey::default() { None } else { Some((pk, i as u8)) }
             });
 
+        let tranching_enabled = vault.tranching_enabled == 1;
         let mut required_state_pubkeys = HashSet::default();
         required_state_pubkeys.insert(pool_id);
+        if tranching_enabled {
+            required_state_pubkeys.insert(Pubkey::find_program_address(
+                &[VAULT_TRANCHE_SEED, pool_id.as_ref()],
+                &YOUR_PROGRAM_ID,
+            ).0);
+        }
 
         YourVenue {
             pool_id,
@@ -436,13 +446,12 @@ impl YourVenue {
             initialized: false,
             share_mint,
             total_mint_supply: vault.accounting.total_mint_supply,
-            // Tranche-adjusted backing needs the tranche account; until that is
-            // wired into required_state_pubkeys, use raw TVL (correct when
-            // tranching is disabled).
+            // Raw TVL until update_state loads the tranche account and subtracts
+            // the junior + senior claim (when tranching is enabled).
             backing_value: vault.accounting.tvl,
             mint_fee_bps: vault.config.fees.mint_fee_bps,
             burn_fee_bps: vault.config.fees.burn_fee_bps,
-            tranching_enabled: vault.tranching_enabled == 1,
+            tranching_enabled,
             circuit_breaker_active: vault.circuit_breaker_active != 0,
             marginfi_position,
             base_holdings,
@@ -532,7 +541,33 @@ impl TradingVenue for YourVenue {
             .map_err(|_| TradingVenueError::DeserializationFailed(self.pool_id.into()))?;
 
         // Rebuild all derived state from the refreshed vault account.
-        let updated = YourVenue::build_from_vault(self.pool_id, &vault);
+        let mut updated = YourVenue::build_from_vault(self.pool_id, &vault);
+
+        // Regular share-class NAV is tvl − tranche claim when tranching is on.
+        if updated.tranching_enabled {
+            let tranche_pda = Pubkey::find_program_address(
+                &[VAULT_TRANCHE_SEED, self.pool_id.as_ref()],
+                &YOUR_PROGRAM_ID,
+            )
+            .0;
+            let tranche_accounts = cache.get_accounts(&[tranche_pda]).await?;
+            let tranche_account = tranche_accounts
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or_else(|| TradingVenueError::MissingState(tranche_pda.into()))?;
+            let tranche = VaultTrancheState::from_account_data(&tranche_account.data)
+                .map_err(|_| TradingVenueError::DeserializationFailed(tranche_pda.into()))?;
+            let tranche_value = tranche
+                .junior
+                .value
+                .saturating_add(tranche.senior.value);
+            updated.backing_value = vault
+                .accounting
+                .tvl
+                .saturating_sub(tranche_value);
+        }
+
         self.share_mint = updated.share_mint;
         self.total_mint_supply = updated.total_mint_supply;
         self.backing_value = updated.backing_value;
@@ -543,6 +578,7 @@ impl TradingVenue for YourVenue {
         self.marginfi_position = updated.marginfi_position;
         self.base_holdings = updated.base_holdings;
         self.token_info = updated.token_info;
+        self.required_state_pubkeys = updated.required_state_pubkeys;
         self.initialized = true;
         Ok(())
     }
