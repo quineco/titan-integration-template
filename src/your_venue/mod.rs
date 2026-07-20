@@ -256,7 +256,7 @@ fn marginal_price(
     let scale = 10f64.powi(asset_decimals as i32);
 
     let rate = if is_deposit {
-        // d(shares)/d(in) = (1−fee) × asset_price × supply / (tvl × 10^dec)
+        // d(shares)/d(in) = (1−fee) × asset_price × supply / (backing × 10^dec)
         // Empty vault mints 1:1 with accounting units.
         if total_mint_supply == 0 || backing_value == 0 {
             asset_price as f64 / scale
@@ -267,7 +267,7 @@ fn marginal_price(
         if total_mint_supply == 0 || backing_value == 0 {
             return None;
         }
-        // d(tokens)/d(shares) = (1−fee) × tvl × 10^dec / (supply × asset_price)
+        // d(tokens)/d(shares) = (1−fee) × backing × 10^dec / (supply × asset_price)
         backing_value as f64 * scale / (total_mint_supply as f64 * asset_price as f64)
     };
     Some(rate * fee_factor)
@@ -351,6 +351,10 @@ fn calc_out(
     }
 }
 
+fn vault_tranche_pda(vault: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[VAULT_TRANCHE_SEED, vault.as_ref()], &YOUR_PROGRAM_ID).0
+}
+
 /// Bankineco vault quoting venue.
 ///
 /// Wraps a single vault instance. Supports deposit (base asset → USD* shares)
@@ -368,8 +372,11 @@ pub struct YourVenue {
     share_mint: Pubkey,
     /// Total supply of the vault share mint (raw atoms).
     total_mint_supply: u64,
-    /// Regular share-class backing value (`tvl`, or `tvl − tranche` when tranched).
-    backing_value: u64,
+    /// Vault TVL in accounting units (before subtracting tranche claim).
+    tvl: u64,
+    /// Junior + senior tranche claim on TVL (accounting units). Zero when
+    /// tranching is disabled. Regular share-class NAV is `tvl - tranche_value`.
+    tranche_value: u64,
     mint_fee_bps: u16,
     burn_fee_bps: u16,
     tranching_enabled: bool,
@@ -433,10 +440,7 @@ impl YourVenue {
         let mut required_state_pubkeys = HashSet::default();
         required_state_pubkeys.insert(pool_id);
         if tranching_enabled {
-            required_state_pubkeys.insert(Pubkey::find_program_address(
-                &[VAULT_TRANCHE_SEED, pool_id.as_ref()],
-                &YOUR_PROGRAM_ID,
-            ).0);
+            required_state_pubkeys.insert(vault_tranche_pda(&pool_id));
         }
 
         YourVenue {
@@ -446,9 +450,9 @@ impl YourVenue {
             initialized: false,
             share_mint,
             total_mint_supply: vault.accounting.total_mint_supply,
-            // Raw TVL until update_state loads the tranche account and subtracts
-            // the junior + senior claim (when tranching is enabled).
-            backing_value: vault.accounting.tvl,
+            tvl: vault.accounting.tvl,
+            // Loaded from the tranche account in update_state when enabled.
+            tranche_value: 0,
             mint_fee_bps: vault.config.fees.mint_fee_bps,
             burn_fee_bps: vault.config.fees.burn_fee_bps,
             tranching_enabled,
@@ -456,6 +460,12 @@ impl YourVenue {
             marginfi_position,
             base_holdings,
         }
+    }
+
+    /// Regular share-class NAV: `tvl − tranche_value` (matches AMM / onchain
+    /// `regular_backing_value`).
+    fn backing_value(&self) -> u64 {
+        self.tvl.saturating_sub(self.tranche_value)
     }
 
     fn base_holding_for(&self, mint: &Pubkey) -> Option<(u64, u8, bool)> {
@@ -543,13 +553,10 @@ impl TradingVenue for YourVenue {
         // Rebuild all derived state from the refreshed vault account.
         let mut updated = YourVenue::build_from_vault(self.pool_id, &vault);
 
-        // Regular share-class NAV is tvl − tranche claim when tranching is on.
-        if updated.tranching_enabled {
-            let tranche_pda = Pubkey::find_program_address(
-                &[VAULT_TRANCHE_SEED, self.pool_id.as_ref()],
-                &YOUR_PROGRAM_ID,
-            )
-            .0;
+        // Tranche classes claim part of TVL; the regular share class is backed by
+        // tvl - tranche_value. Read the tranche state when tranching is enabled.
+        updated.tranche_value = if updated.tranching_enabled {
+            let tranche_pda = vault_tranche_pda(&self.pool_id);
             let tranche_accounts = cache.get_accounts(&[tranche_pda]).await?;
             let tranche_account = tranche_accounts
                 .into_iter()
@@ -558,19 +565,15 @@ impl TradingVenue for YourVenue {
                 .ok_or_else(|| TradingVenueError::MissingState(tranche_pda.into()))?;
             let tranche = VaultTrancheState::from_account_data(&tranche_account.data)
                 .map_err(|_| TradingVenueError::DeserializationFailed(tranche_pda.into()))?;
-            let tranche_value = tranche
-                .junior
-                .value
-                .saturating_add(tranche.senior.value);
-            updated.backing_value = vault
-                .accounting
-                .tvl
-                .saturating_sub(tranche_value);
-        }
+            tranche.junior.value.saturating_add(tranche.senior.value)
+        } else {
+            0
+        };
 
         self.share_mint = updated.share_mint;
         self.total_mint_supply = updated.total_mint_supply;
-        self.backing_value = updated.backing_value;
+        self.tvl = updated.tvl;
+        self.tranche_value = updated.tranche_value;
         self.mint_fee_bps = updated.mint_fee_bps;
         self.burn_fee_bps = updated.burn_fee_bps;
         self.tranching_enabled = updated.tranching_enabled;
@@ -606,12 +609,18 @@ impl TradingVenue for YourVenue {
             self.burn_fee_bps
         };
 
+        // Match onchain deposit/withdraw planning: shares are minted/burned against
+        // the regular class NAV (TVL net of the tranche classes' claim) ÷ supply,
+        // not the floored mint_share_price inverse (which caused quote drift).
+        let total_mint_supply = self.total_mint_supply;
+        let backing_value = self.backing_value();
+
         let price = marginal_price(
             is_deposit,
             asset_price,
             asset_decimals,
-            self.total_mint_supply,
-            self.backing_value,
+            total_mint_supply,
+            backing_value,
             fee_bps,
         )
         .ok_or_else(|| TradingVenueError::MissingState("quote math overflow".into()))?;
@@ -633,8 +642,8 @@ impl TradingVenue for YourVenue {
             request.amount,
             asset_price,
             asset_decimals,
-            self.total_mint_supply,
-            self.backing_value,
+            total_mint_supply,
+            backing_value,
             fee_bps,
         )
         .ok_or_else(|| TradingVenueError::MissingState("quote math overflow".into()))?;
@@ -691,7 +700,7 @@ impl TradingVenue for YourVenue {
         // whose key equals the program id as None — omitting the slot entirely
         // shifts every subsequent account (including Marginfi remaining accounts).
         let vault_tranche_state = if self.tranching_enabled {
-            self.find_pda(&[VAULT_TRANCHE_SEED, self.pool_id.as_ref()])
+            vault_tranche_pda(&self.pool_id)
         } else {
             YOUR_PROGRAM_ID
         };
