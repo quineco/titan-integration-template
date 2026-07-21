@@ -45,7 +45,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
-use vault_sdk::{Vault, VaultTrancheState};
+use vault_sdk::{TokenProgram, Vault, VaultTrancheState};
 
 use crate::{
     account_caching::AccountsCache,
@@ -398,16 +398,30 @@ impl YourVenue {
             .iter()
             .filter(|h| h.is_base == 1 && h.mint != [0u8; 32])
             .map(|h| {
-                // TokenProgram: Spl = 0, Token2022 = 1
-                (Pubkey::from(h.mint), h.price, h.decimals, h.token_program == 1, h.local_amount, h.external_amount)
+                let is_token_2022 = matches!(
+                    h.token_program_enum().ok(),
+                    Some(TokenProgram::Token2022)
+                );
+                (
+                    Pubkey::from(h.mint),
+                    h.price,
+                    h.decimals,
+                    is_token_2022,
+                    h.local_amount,
+                    h.external_amount,
+                )
             })
             .collect();
 
-        // Share mint (USD*) first at index 0, base holdings follow.
+        // Share mint first at index 0; token program from vault.mint_token_program.
+        let share_is_token_2022 = matches!(
+            vault.share_mint_token_program().ok(),
+            Some(TokenProgram::Token2022)
+        );
         let mut token_info = vec![TokenInfo {
             pubkey: share_mint,
             decimals: vault.mint_decimals as i32,
-            is_token_2022: false, // USD* is a standard SPL Token
+            is_token_2022: share_is_token_2022,
             transfer_fee: None,
             maximum_fee: None,
         }];
@@ -677,8 +691,8 @@ impl TradingVenue for YourVenue {
         };
 
         let asset_token_program = self.token_program_for(&asset_mint);
-        // USD* (share mint) is always a standard SPL Token.
-        let share_token_program = TOKEN_PROGRAM_ID;
+        // Share mint program from vault.mint_token_program (via token_info).
+        let share_token_program = self.token_program_for(&self.share_mint);
 
         let vault_oracle =
             self.find_pda(&[VAULT_ORACLE_SEED, self.pool_id.as_ref()]);
